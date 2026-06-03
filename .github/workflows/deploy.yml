@@ -1,13 +1,7 @@
 name: Deploy to appeals.kineticgain.com
 
-# Hostinger FTP deploy — Vite/React build → dist/ → /appeals/ on Hostinger.
-# Replaces GitHub Pages deployment (pages.yml.disabled).
-#
-# Required secrets in repo Settings → Secrets and variables → Actions:
-#   FTP_SERVER       — Hostinger FTP hostname (e.g. ftp.kineticgain.com)
-#   FTP_USERNAME     — Hostinger FTP user
-#   FTP_PASSWORD     — Hostinger FTP password
-# Same convention as cert / jml / mt / pv / scopes.
+# Julia generate_site.jl → site/ → Hostinger FTP at /appeals/
+# Replaces GitHub Pages (pages.yml.disabled). Same FTP_SERVER/FTP_USERNAME/FTP_PASSWORD secrets.
 
 on:
   push:
@@ -18,8 +12,6 @@ on:
       - 'LICENSE'
       - 'docs/**'
       - 'screenshots/**'
-      - 'fixtures/**'
-      - 'coverage/**'
   workflow_dispatch:
 
 permissions:
@@ -33,46 +25,20 @@ jobs:
   build-deploy:
     name: Build + FTP-sync to appeals.kineticgain.com
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - uses: julia-actions/setup-julia@v2
 
-      - name: Install
-        run: npm ci || npm install
-
-      - name: Build
-        run: |
-          # Prefer prerender (static-output) over build if both exist
-          if npm run | grep -q "^  prerender$"; then
-            npm run prerender
-          else
-            npm run build
-          fi
+      - name: Generate site
+        run: julia --project=. scripts/generate_site.jl
 
       - name: Verify build output
         run: |
-          # Find the build output dir — Vite default is dist/
-          if [ -d "dist" ]; then
-            DEPLOY_DIR="dist"
-          elif [ -d "build" ]; then
-            DEPLOY_DIR="build"
-          elif [ -d "site" ]; then
-            DEPLOY_DIR="site"
-          else
-            echo "FAIL: No dist/, build/, or site/ directory produced"
-            exit 1
-          fi
-          echo "DEPLOY_DIR=$DEPLOY_DIR" >> $GITHUB_ENV
-          echo "Build output found in: $DEPLOY_DIR"
-          ls -lah "$DEPLOY_DIR" | head -20
-          test -f "$DEPLOY_DIR/index.html" || (echo "FAIL: $DEPLOY_DIR/index.html missing" && exit 1)
+          test -d site || (echo "FAIL: site/ missing after generate_site.jl" && exit 1)
+          test -f site/index.html || (echo "FAIL: site/index.html missing" && exit 1)
+          ls -lah site | head -10
 
       - name: FTP Deploy
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
@@ -80,32 +46,9 @@ jobs:
           server: ${{ secrets.FTP_SERVER }}
           username: ${{ secrets.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD }}
-          local-dir: ./${{ env.DEPLOY_DIR }}/
+          local-dir: ./site/
           server-dir: /appeals/
           exclude: |
             **/.git*
             **/.git*/**
             **/.github/**
-            **/node_modules/**
-            **/.DS_Store
-
-      - name: Verify live
-        run: |
-          sleep 30
-          # Try HTTPS first; fall back to HTTP for cases where SSL is still propagating
-          if curl -fsSL --max-time 15 "https://appeals.kineticgain.com/" > /tmp/live.html; then
-            echo "OK: HTTPS live at https://appeals.kineticgain.com/"
-          elif curl -fsSL --max-time 15 "http://appeals.kineticgain.com/" > /tmp/live.html; then
-            echo "WARN: HTTP live but HTTPS not ready (DNS/cert may still be propagating)"
-          else
-            echo "FAIL: neither HTTPS nor HTTP responding"
-            exit 1
-          fi
-          # Sanity: title or some content should be there
-          if grep -q "html" /tmp/live.html; then
-            echo "OK: live page returned HTML"
-          else
-            echo "FAIL: live response is not HTML"
-            head /tmp/live.html
-            exit 1
-          fi
